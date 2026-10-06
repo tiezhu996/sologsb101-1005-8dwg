@@ -8,7 +8,7 @@ import { Observable, combineLatest, map, shareReplay } from 'rxjs';
 import { IdbTableService } from './idb-table.service';
 import { listBearings, listBridges, listReadings, listSteps } from '../utils/db';
 import type { BridgeRow, BearingRow, ReadingRow, StepRow } from '../utils/db';
-import { sortSteps, SYNC_REQUIREMENT_LABEL, type StepView } from '../types/step';
+import { sortSteps, SYNC_REQUIREMENT_LABEL, resolveResumption, type StepView } from '../types/step';
 import { meanDisplacement, syncDeviationMm, type ReadingView } from '../types/reading';
 import { overallLevel, syncLevel, type ToleranceLevel } from '../utils/tolerance';
 
@@ -166,6 +166,7 @@ export class StepTimelineService {
           : deviation !== null && syncLevel(deviation) === 'exceed'
             ? `同步偏差 ${deviation.toFixed(2)} mm 超允许值，需调平后继续`
             : '顶升参数与监测数据均在控制范围内',
+        resumption: resolveResumption(step, rows),
       };
     });
   }

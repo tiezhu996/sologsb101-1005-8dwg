@@ -1,7 +1,7 @@
 import { createFeatureSelector, createSelector } from '@ngrx/store';
 import type { StepStateSlice } from './step.reducer';
 import type { BridgeRow, ReadingRow, StepRow } from '../utils/db';
-import { SYNC_REQUIREMENT_LABEL, syncLayoutHint, type StepView } from '../types/step';
+import { SYNC_REQUIREMENT_LABEL, resolveResumption, syncLayoutHint, type StepView } from '../types/step';
 import { meanDisplacement, syncDeviationMm } from '../types/reading';
 import { syncLevel, type ToleranceLevel } from '../utils/tolerance';
 
@@ -52,6 +52,7 @@ export function buildStepViews(steps: StepRow[], readings: ReadingRow[], bridges
         : deviation !== null && syncLevel(deviation) === 'exceed'
           ? `同步偏差 ${deviation.toFixed(2)} mm 超允许值`
           : '顶升参数与监测数据均在控制范围内',
+      resumption: resolveResumption(step, rows),
     };
   });
 }

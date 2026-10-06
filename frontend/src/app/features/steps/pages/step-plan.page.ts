@@ -21,6 +21,7 @@ import {
   SYNC_REQUIREMENTS,
   SYNC_REQUIREMENT_LABEL,
   cumulativeHint,
+  evaluateAdvanceGate,
   liftStepHint,
   syncLayoutHint,
   type StepDraft,
@@ -240,6 +241,7 @@ export class StepDialogComponent {
               <th>目标顶升量</th>
               <th>累计顶升量</th>
               <th>限位值</th>
+              <th>已完成 / 接续量</th>
               <th>同步要求</th>
               <th>负责人</th>
               <th>状态</th>
@@ -258,6 +260,7 @@ export class StepDialogComponent {
                   {{ step.cumulativeLiftMm }} mm
                 </td>
                 <td>{{ step.limitMm }} mm</td>
+                <td [style.color]="resumptionColor(step)">{{ resumptionText(step) }}</td>
                 <td [matTooltip]="syncHintOf(step)">{{ syncRequirementLabel[step.syncRequirement] }}</td>
                 <td>{{ step.leader }}</td>
                 <td>
@@ -478,6 +481,19 @@ export class StepPlanPage {
     return syncLayoutHint(step.syncRequirement);
   }
 
+  /** 接续核定文案：已完成量取最新一组多点最大值，未完成写明原因 */
+  resumptionText(step: StepView): string {
+    const resumption = step.resumption;
+    if (!resumption.settled || resumption.completedMm === null || resumption.continuationMm === null) {
+      return `未完成：${resumption.reason}`;
+    }
+    return `已完成 ${formatMm(resumption.completedMm)} · 接续量 ${formatMm(resumption.continuationMm)}`;
+  }
+
+  resumptionColor(step: StepView): string {
+    return step.resumption.settled ? '#1565c0' : '#c62828';
+  }
+
   levelColor(step: StepView): string {
     const level = this.syncLevels()[step.id] ?? 'ok';
     return TOLERANCE_HEX[level];
@@ -527,8 +543,16 @@ export class StepPlanPage {
   }
 
   advance(step: StepView, next: StepState): void {
+    // 放行检查：已完成量 + 接续量 + 剩余目标触及限位则不放行，并写明超出多少
+    const gate = evaluateAdvanceGate(step, next, this.steps(), this.readings());
+    if (!gate.allowed) {
+      this.notify(gate.message, 5200);
+      return;
+    }
     this.store.dispatch(stepActions.advanceState({ id: step.id, next }));
-    this.notify(`步骤 #${step.seq} 已推进为${STEP_STATE_LABEL[next]}`);
+    this.notify(
+      `步骤 #${step.seq} 已推进为${STEP_STATE_LABEL[next]}（已完成 ${gate.completedMm} mm · 接续量 ${gate.continuationMm} mm）`,
+    );
   }
 
   openDialog(step: StepView | null): void {
@@ -596,7 +620,7 @@ export class StepPlanPage {
     void this.router.navigate([], { relativeTo: this.route, queryParams, replaceUrl: true });
   }
 
-  private notify(message: string): void {
-    this.snackBar.open(message, '关闭', { duration: 2600 });
+  private notify(message: string, duration = 2600): void {
+    this.snackBar.open(message, '关闭', { duration });
   }
 }

@@ -7,11 +7,13 @@ import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatChipsModule } from '@angular/material/chips';
+import { MatDialog, MatDialogModule, MatDialogRef, MAT_DIALOG_DATA } from '@angular/material/dialog';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatSelectModule } from '@angular/material/select';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { Inject } from '@angular/core';
 import { STEP_STATE_LABEL, SYNC_REQUIREMENT_LABEL, type StepView } from '../../../core/types/step';
 import {
   POINT_CODES,
@@ -27,7 +29,7 @@ import { stepActions } from '../../../core/store/step.actions';
 import { buildStepViews, selectStepStats } from '../../../core/store/step.selectors';
 import { selectBridges } from '../../../core/store/bridge.selectors';
 import { IdbTableService } from '../../../core/services/idb-table.service';
-import { putReadings, rowMeta, newId, type ReadingRow } from '../../../core/utils/db';
+import { putReading, putReadings, rowMeta, newId, type ReadingRow } from '../../../core/utils/db';
 import { formatMm, formatStress } from '../../../core/utils/unit';
 import {
   TOLERANCE_HEX,
@@ -50,6 +52,85 @@ interface BatchRow {
   stressMpa: number;
 }
 
+/** 读数更正草稿（recordedAt 为 datetime-local 口径 yyyy-MM-ddTHH:mm） */
+interface ReadingEditDraft {
+  pointCode: string;
+  displacementMm: number;
+  stressMpa: number;
+  recordedAt: string;
+  operator: string;
+}
+
+/** 读数更正对话框数据 */
+export interface ReadingDialogData {
+  draft: ReadingEditDraft;
+  stepLabel: string;
+}
+
+/** 历史读数更正对话框：保存后接续量与提示随 store 重算 */
+@Component({
+  selector: 'app-reading-dialog',
+  standalone: true,
+  imports: [FormsModule, MatDialogModule, MatFormFieldModule, MatInputModule, MatButtonModule],
+  template: `
+    <h2 mat-dialog-title>更正测点读数</h2>
+    <mat-dialog-content>
+      <p class="gb-hint">{{ data.stepLabel }} · 更正后已完成量 / 接续量与限位提示将自动重算</p>
+      <div class="gb-form-grid">
+        <mat-form-field appearance="outline">
+          <mat-label>测点编号</mat-label>
+          <input matInput [(ngModel)]="draft.pointCode" />
+        </mat-form-field>
+        <mat-form-field appearance="outline">
+          <mat-label>位移（mm）</mat-label>
+          <input matInput type="number" step="0.01" [(ngModel)]="draft.displacementMm" />
+        </mat-form-field>
+        <mat-form-field appearance="outline">
+          <mat-label>应力（MPa）</mat-label>
+          <input matInput type="number" step="0.01" [(ngModel)]="draft.stressMpa" />
+        </mat-form-field>
+        <mat-form-field appearance="outline">
+          <mat-label>记录时间</mat-label>
+          <input matInput type="datetime-local" [(ngModel)]="draft.recordedAt" />
+        </mat-form-field>
+        <mat-form-field appearance="outline">
+          <mat-label>记录人</mat-label>
+          <input matInput [(ngModel)]="draft.operator" />
+        </mat-form-field>
+      </div>
+    </mat-dialog-content>
+    <mat-dialog-actions align="end">
+      <button mat-button (click)="close()">取消</button>
+      <button
+        mat-flat-button
+        color="primary"
+        [disabled]="!draft.pointCode.trim() || !draft.operator.trim() || !draft.recordedAt"
+        (click)="submit()"
+      >
+        保存更正
+      </button>
+    </mat-dialog-actions>
+  `,
+})
+export class ReadingDialogComponent {
+  readonly draft: ReadingEditDraft;
+
+  constructor(
+    private readonly dialogRef: MatDialogRef<ReadingDialogComponent>,
+    @Inject(MAT_DIALOG_DATA) readonly data: ReadingDialogData,
+  ) {
+    this.draft = { ...data.draft };
+  }
+
+  close(): void {
+    this.dialogRef.close(null);
+  }
+
+  submit(): void {
+    this.dialogRef.close({ ...this.draft });
+  }
+}
+
 /**
  * /readings 测点读数录入
  * 按步骤批量录入位移与应力，实时显示同步偏差与限位告警；
@@ -67,6 +148,7 @@ interface BatchRow {
     MatFormFieldModule,
     MatInputModule,
     MatSelectModule,
+    MatDialogModule,
     MatSnackBarModule,
     MatTooltipModule,
     StatBadgeComponent,
@@ -176,6 +258,9 @@ interface BatchRow {
             </button>
           </div>
           <div class="gb-hint">{{ dateHint() }}</div>
+          @if (selectedStep(); as step) {
+            <div class="gb-hint" [style.color]="resumptionColor(step)">{{ resumptionText(step) }}</div>
+          }
 
           @if (selectedStep(); as step) {
             <div class="gb-table-wrap" style="margin-top: 10px">
@@ -267,7 +352,7 @@ interface BatchRow {
                 <th>记录时间</th>
                 <th>记录人</th>
                 <th>判定</th>
-                <th style="width: 90px">操作</th>
+                <th style="width: 140px">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -293,6 +378,9 @@ interface BatchRow {
                     </mat-chip-set>
                   </td>
                   <td>
+                    <button mat-button (click)="openReadingDialog(reading)">
+                      <mat-icon>edit</mat-icon>
+                    </button>
                     <button mat-button color="warn" (click)="deleteReading(reading)">
                       <mat-icon>delete</mat-icon>
                     </button>
@@ -320,6 +408,7 @@ interface BatchRow {
 export class ReadingEntryPage {
   private readonly store = inject(Store);
   private readonly idb = inject(IdbTableService);
+  private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
   private readonly router = inject(Router);
   private readonly route = inject(ActivatedRoute);
@@ -473,6 +562,22 @@ export class ReadingEntryPage {
     return readingDateHint(this.recordedAt().replace('T', ' '), step?.state ?? 'idle');
   }
 
+  /** 接续核定文案：已完成量取最新一组多点最大值，接续量 = 目标 − 已完成 */
+  resumptionText(step: StepView): string {
+    const resumption = step.resumption;
+    if (!resumption.settled || resumption.completedMm === null || resumption.continuationMm === null) {
+      return `接续核定未完成：${resumption.reason}，复工前请先补测多点读数`;
+    }
+    return (
+      `接续核定：已完成 ${formatMm(resumption.completedMm)}（最新 ${resumption.latestPoints} 点最大值），` +
+      `接续量 ${formatMm(resumption.continuationMm)}，复工按接续量顶升，勿按计划目标重复顶升`
+    );
+  }
+
+  resumptionColor(step: StepView): string {
+    return step.resumption.settled ? '#1565c0' : '#c62828';
+  }
+
   onStepChange(stepId: string): void {
     this.selectedStepId.set(stepId);
     this.regenerateRows();
@@ -582,6 +687,43 @@ export class ReadingEntryPage {
       '关闭',
       { duration: 3000 },
     );
+  }
+
+  /** 更正历史读数：写回后由变更广播驱动 store 重载，接续量与提示跟着重算 */
+  openReadingDialog(reading: ReadingView): void {
+    this.dialog
+      .open(ReadingDialogComponent, {
+        width: '560px',
+        data: {
+          draft: {
+            pointCode: reading.pointCode,
+            displacementMm: reading.displacementMm,
+            stressMpa: reading.stressMpa,
+            recordedAt: reading.recordedAt.replace(' ', 'T'),
+            operator: reading.operator,
+          },
+          stepLabel: `#${reading.stepSeq} ${reading.bridgeName}`,
+        } satisfies ReadingDialogData,
+      })
+      .afterClosed()
+      .subscribe((result: ReadingEditDraft | null) => {
+        if (!result) return;
+        void (async () => {
+          await putReading({
+            id: reading.id,
+            stepId: reading.stepId,
+            pointCode: result.pointCode.trim(),
+            displacementMm: Number(result.displacementMm),
+            stressMpa: Number(result.stressMpa),
+            recordedAt: result.recordedAt.replace('T', ' '),
+            operator: result.operator.trim(),
+            createdAt: reading.createdAt,
+            revision: reading.revision,
+          });
+          this.idb.emitChange();
+          this.snackBar.open('读数已更正，已完成量 / 接续量与提示已重算', '关闭', { duration: 3000 });
+        })();
+      });
   }
 
   async deleteReading(reading: ReadingView): Promise<void> {
