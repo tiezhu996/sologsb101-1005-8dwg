@@ -1,4 +1,5 @@
 import type { RowMeta } from './persistence';
+import type { ContinuationAssessment } from '../utils/continuation';
 
 /** 同步要求 */
 export type SyncRequirement = 'sync' | 'cross' | 'single';
@@ -56,17 +57,19 @@ export interface StepDraft {
   leader: string;
 }
 
-/** 顶升步骤视图：含累计量与校验结论 */
+/** 顶升步骤视图：含累计量、接续量与校验结论 */
 export interface StepView extends Step {
   bridgeName: string;
-  /** 本步及之前步骤的累计目标顶升量（mm） */
+  /** 本步及之前步骤的累计计划目标顶升量（mm） */
   cumulativeLiftMm: number;
-  /** 累计顶升量与限位值的关系 */
+  /** 累计计划目标与限位值的关系 */
   overLimit: boolean;
   /** 该步骤的测点读数条数 */
   readingCount: number;
   /** 同步偏差（mm），无读数为 null */
   syncDeviationMm: number | null;
+  /** 停工再进场接续量评估（以最新一组多点最大位移为已完成量基准） */
+  continuation: ContinuationAssessment;
   /** 校验结论文案 */
   validation: string;
 }

@@ -37,6 +37,7 @@ import type { AcceptanceRow } from '../utils/db';
 import { escalateGrade } from '../types/bearing';
 import { resequenceSteps } from '../types/step';
 import { checkBridgeArchived } from './archive.helper';
+import { assessContinuation } from '../utils/continuation';
 
 @Injectable()
 export class AppEffects {
@@ -561,7 +562,7 @@ export class AppEffects {
     { dispatch: true },
   );
 
-  /** 顶升步骤：推进状态 */
+  /** 顶升步骤：推进状态（推进到已到位前校验停工接续量，不放行则拒绝写入） */
   readonly advanceStep$ = createEffect(
     () =>
       this.actions$.pipe(
@@ -569,13 +570,26 @@ export class AppEffects {
         switchMap(({ id, next }) =>
           from(
             (async () => {
-              const existing = (await listSteps()).find((item) => item.id === id);
-              if (!existing) return;
+              const allSteps = await listSteps();
+              const existing = allSteps.find((item) => item.id === id);
+              if (!existing) return { ok: false, message: '顶升步骤不存在，无法推进' };
+              if (next === 'arrived') {
+                const rows = (await listReadings()).filter((item) => item.stepId === id);
+                const assessment = assessContinuation(existing, rows);
+                if (!assessment.canAdvance) {
+                  return { ok: false, message: assessment.hint };
+                }
+              }
               await putStep({ ...existing, state: next });
               this.idb.emitChange();
+              return { ok: true, message: '数据已保存' };
             })(),
           ).pipe(
-            map(() => writeSucceeded({ message: '数据已保存' })),
+            map((result) =>
+              result.ok
+                ? writeSucceeded({ message: result.message })
+                : writeFailed({ message: result.message }),
+            ),
             catchError((error: unknown) =>
               from([
                 writeFailed({ message: error instanceof Error ? error.message : '推进步骤状态失败' }),

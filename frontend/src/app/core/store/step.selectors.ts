@@ -4,6 +4,7 @@ import type { BridgeRow, ReadingRow, StepRow } from '../utils/db';
 import { SYNC_REQUIREMENT_LABEL, syncLayoutHint, type StepView } from '../types/step';
 import { meanDisplacement, syncDeviationMm } from '../types/reading';
 import { syncLevel, type ToleranceLevel } from '../utils/tolerance';
+import { assessContinuation } from '../utils/continuation';
 
 export const selectStepState = createFeatureSelector<StepStateSlice>('step');
 export const selectSteps = createSelector(selectStepState, (state) => state.steps);
@@ -29,17 +30,26 @@ export const selectActiveSteps = createSelector(
   (steps, bridgeId) => steps.filter((item) => !bridgeId || item.bridgeId === bridgeId).sort((a, b) => a.seq - b.seq),
 );
 
-/** 步骤视图：含累计顶升量、同步偏差与校验结论 */
+/** 步骤视图：含累计顶升量、接续量、同步偏差与校验结论 */
 export function buildStepViews(steps: StepRow[], readings: ReadingRow[], bridges: BridgeRow[]): StepView[] {
   const bridgeName = new Map(bridges.map((item) => [item.id, item.name]));
-  const ordered = [...steps].sort((a, b) => a.seq - b.seq);
-  let running = 0;
+  const ordered = [...steps].sort((a, b) =>
+    a.bridgeId === b.bridgeId ? a.seq - b.seq : a.bridgeId.localeCompare(b.bridgeId),
+  );
+  // 累计计划目标按桥梁分别累计（步骤混排时不能跨桥累加）
+  const cumulative = new Map<string, number>();
+  const runningByBridge = new Map<string, number>();
+  for (const step of ordered) {
+    const running = (runningByBridge.get(step.bridgeId) ?? 0) + step.targetLiftMm;
+    runningByBridge.set(step.bridgeId, running);
+    cumulative.set(step.id, Number(running.toFixed(2)));
+  }
   return ordered.map((step) => {
-    running += step.targetLiftMm;
     const rows = readings.filter((item) => item.stepId === step.id);
     const deviation = rows.length > 0 ? syncDeviationMm(rows) : null;
-    const cumulativeLiftMm = Number(running.toFixed(2));
+    const cumulativeLiftMm = cumulative.get(step.id) ?? step.targetLiftMm;
     const overLimit = cumulativeLiftMm > step.limitMm;
+    const continuation = assessContinuation(step, rows);
     return {
       ...step,
       bridgeName: bridgeName.get(step.bridgeId) ?? '未归属桥梁',
@@ -47,13 +57,31 @@ export function buildStepViews(steps: StepRow[], readings: ReadingRow[], bridges
       overLimit,
       readingCount: rows.length,
       syncDeviationMm: deviation,
-      validation: overLimit
-        ? `累计顶升量 ${cumulativeLiftMm} mm 超过限位 ${step.limitMm} mm`
-        : deviation !== null && syncLevel(deviation) === 'exceed'
-          ? `同步偏差 ${deviation.toFixed(2)} mm 超允许值`
-          : '顶升参数与监测数据均在控制范围内',
+      continuation,
+      validation: buildValidation(step.state, continuation, cumulativeLiftMm, step.limitMm, deviation),
     };
   });
+}
+
+/** 校验结论：未到位步骤优先呈现停工接续结论（不放行原因），再看累计目标与同步偏差 */
+function buildValidation(
+  state: StepRow['state'],
+  continuation: ReturnType<typeof assessContinuation>,
+  cumulativeLiftMm: number,
+  limitMm: number,
+  deviation: number | null,
+): string {
+  if (state !== 'arrived' && !continuation.canAdvance) return continuation.hint;
+  if (cumulativeLiftMm > limitMm) {
+    return `累计计划目标 ${cumulativeLiftMm} mm 超过限位 ${limitMm} mm，请复核分级`;
+  }
+  if (state !== 'arrived' && continuation.continuationMm !== null) {
+    return continuation.hint;
+  }
+  if (deviation !== null && syncLevel(deviation) === 'exceed') {
+    return `同步偏差 ${deviation.toFixed(2)} mm 超允许值，需调平后继续`;
+  }
+  return '顶升参数与监测数据均在控制范围内';
 }
 
 /** 步骤统计：总级数、累计顶升量、就位数、超限数 */

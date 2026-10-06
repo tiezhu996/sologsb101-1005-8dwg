@@ -323,7 +323,8 @@ async function seedDatabase(): Promise<void> {
             pointCode: `P${point + 1}`,
             displacementMm: Number((base + jitter).toFixed(2)),
             stressMpa: Number((7 + random() * 6).toFixed(2)),
-            recordedAt: dateTimeText(0, 9 + round, 5 + point * 5),
+            // 同一轮（组）多测点共用记录时间，作为「最新一组多点读数」的分组依据
+            recordedAt: dateTimeText(0, 9 + round, 10),
             operator: operators[(stepIndex + round) % operators.length],
             createdAt: stamp,
             revision: ROW_REVISION,

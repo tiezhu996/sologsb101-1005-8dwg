@@ -32,7 +32,6 @@ import { ROUTES } from '../../../core/router/app.routes';
 import { stepActions } from '../../../core/store/step.actions';
 import {
   buildStepViews,
-  selectStepAverages,
   selectStepStats,
   selectSyncHints,
   selectSyncLevels,
@@ -244,6 +243,7 @@ export class StepDialogComponent {
               <th>负责人</th>
               <th>状态</th>
               <th>测点 / 偏差</th>
+              <th>复工接续（最新多点最大）</th>
               <th>校验结论</th>
               <th style="width: 260px">操作</th>
             </tr>
@@ -273,6 +273,28 @@ export class StepDialogComponent {
                     </span>
                   }
                 </td>
+                <td class="continuation-cell">
+                  @if (step.state === 'arrived') {
+                    <span class="continuation-done">已到位</span>
+                  } @else {
+                    @if (step.continuation.completedMm !== null) {
+                      <div>已完成 {{ step.continuation.completedMm }} mm</div>
+                    }
+                    @if (step.continuation.continuationMm !== null) {
+                      <div [class.continuation-block]="continuationBlocked(step)">
+                        接续量 <strong>{{ step.continuation.continuationMm }} mm</strong>
+                      </div>
+                    }
+                    @if (step.continuation.incompleteReason) {
+                      <div class="continuation-block" [matTooltip]="step.continuation.hint">
+                        {{ continuationReasonText(step) }}
+                      </div>
+                    }
+                    @if (step.continuation.latestRecordedAt) {
+                      <div class="gb-hint">最新一组 {{ step.continuation.latestRoundCount }} 点 · {{ step.continuation.latestRecordedAt }}</div>
+                    }
+                  }
+                </td>
                 <td class="gb-hint">{{ step.validation }}</td>
                 <td>
                   <div class="gb-row-actions">
@@ -283,7 +305,13 @@ export class StepDialogComponent {
                       <mat-icon>arrow_downward</mat-icon>
                     </button>
                     @for (next of nextStates(step.state); track next) {
-                      <button mat-button color="primary" (click)="advance(step, next)">
+                      <button
+                        mat-button
+                        color="primary"
+                        [disabled]="isAdvanceBlocked(step, next)"
+                        [matTooltip]="advanceTooltip(step, next)"
+                        (click)="advance(step, next)"
+                      >
                         <mat-icon>play_arrow</mat-icon>
                         {{ stepStateLabel[next] }}
                       </button>
@@ -320,11 +348,11 @@ export class StepDialogComponent {
         hint="同步偏差处于正常档的步骤数"
       />
       <app-stat-badge
-        title="超限步骤"
+        title="超限 / 接续受阻"
         [value]="exceedSteps().length"
         [suffix]="'级'"
         color="#c62828"
-        hint="累计顶升量超过限位或同步偏差超允许值"
+        hint="累计计划超限位、同步偏差超允许值，或接续后碰限位 / 未完成（无读数、仅单点）"
       />
       <app-stat-badge
         title="平均单级顶升量"
@@ -359,6 +387,19 @@ export class StepDialogComponent {
       mat-chip.state-arrived {
         background: #e8f5e9 !important;
         color: #1b5e20 !important;
+      }
+      .continuation-cell {
+        font-size: 12.5px;
+        line-height: 1.7;
+        white-space: nowrap;
+      }
+      .continuation-done {
+        color: #1b5e20;
+        font-weight: 600;
+      }
+      .continuation-block {
+        color: #c62828;
+        font-weight: 600;
       }
     `,
   ],
@@ -406,7 +447,6 @@ export class StepPlanPage {
     { initialValue: {} as Record<string, ToleranceLevel> },
   );
   readonly syncHints = toSignal(this.store.select(selectSyncHints), { initialValue: [] });
-  readonly stepAverages = toSignal(this.store.select(selectStepAverages), { initialValue: {} });
 
   readonly stepViews: Signal<StepView[]> = computed(() =>
     buildStepViews(this.steps(), this.readings(), this.bridges()),
@@ -436,10 +476,20 @@ export class StepPlanPage {
   });
 
   readonly okSteps = computed(() =>
-    this.filtered().filter((step) => (this.syncLevels()[step.id] ?? 'ok') === 'ok' && !step.overLimit),
+    this.filtered().filter(
+      (step) =>
+        (this.syncLevels()[step.id] ?? 'ok') === 'ok' &&
+        !step.overLimit &&
+        !this.continuationBlocked(step),
+    ),
   );
   readonly exceedSteps = computed(() =>
-    this.filtered().filter((step) => step.overLimit || this.syncLevels()[step.id] === 'exceed'),
+    this.filtered().filter(
+      (step) =>
+        step.overLimit ||
+        this.syncLevels()[step.id] === 'exceed' ||
+        this.continuationBlocked(step),
+    ),
   );
 
   readonly remainingMm = computed(() => {
@@ -472,6 +522,32 @@ export class StepPlanPage {
 
   nextStates(state: StepState): StepState[] {
     return STEP_STATE_FLOW[state];
+  }
+
+  /** 接续量是否受阻（接续后碰限位 / 未完成） */
+  continuationBlocked(step: StepView): boolean {
+    return step.state !== 'arrived' && !step.continuation.canAdvance;
+  }
+
+  /** 接续受阻 / 未完成原因（单元格短文案，完整说明走 tooltip 与校验结论列） */
+  continuationReasonText(step: StepView): string {
+    const c = step.continuation;
+    if (!c.incompleteReason) return '';
+    if (c.latestRoundCount === 0) return '未完成：尚无读数';
+    if (c.latestRoundCount === 1) return '未完成：最新一组仅单点';
+    if (c.limitTouched) return `未完成：位移触限位（超 ${(c.overLimitMm ?? 0).toFixed(2)} mm）`;
+    return `不放行：接续后超限位（超 ${(c.overLimitMm ?? 0).toFixed(2)} mm）`;
+  }
+
+  /** 推进到「已到位」前：接续量未确认 / 接续后碰限位时禁止放行 */
+  isAdvanceBlocked(step: StepView, next: StepState): boolean {
+    if (next !== 'arrived') return false;
+    return !step.continuation.canAdvance;
+  }
+
+  advanceTooltip(step: StepView, next: StepState): string {
+    if (!this.isAdvanceBlocked(step, next)) return `推进为${STEP_STATE_LABEL[next]}`;
+    return step.continuation.hint;
   }
 
   syncHintOf(step: StepView): string {
@@ -527,6 +603,10 @@ export class StepPlanPage {
   }
 
   advance(step: StepView, next: StepState): void {
+    if (this.isAdvanceBlocked(step, next)) {
+      this.notify(step.continuation.hint);
+      return;
+    }
     this.store.dispatch(stepActions.advanceState({ id: step.id, next }));
     this.notify(`步骤 #${step.seq} 已推进为${STEP_STATE_LABEL[next]}`);
   }

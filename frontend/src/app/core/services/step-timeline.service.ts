@@ -8,9 +8,10 @@ import { Observable, combineLatest, map, shareReplay } from 'rxjs';
 import { IdbTableService } from './idb-table.service';
 import { listBearings, listBridges, listReadings, listSteps } from '../utils/db';
 import type { BridgeRow, BearingRow, ReadingRow, StepRow } from '../utils/db';
-import { sortSteps, SYNC_REQUIREMENT_LABEL, type StepView } from '../types/step';
+import { SYNC_REQUIREMENT_LABEL, type StepView } from '../types/step';
 import { meanDisplacement, syncDeviationMm, type ReadingView } from '../types/reading';
 import { overallLevel, syncLevel, type ToleranceLevel } from '../utils/tolerance';
+import { buildStepViews } from '../store/step.selectors';
 
 /** 步骤时间线的一级节点 */
 export interface StepTimelineNode {
@@ -139,34 +140,8 @@ export class StepTimelineService {
     shareReplay({ bufferSize: 1, refCount: true }),
   );
 
-  /** 构建步骤视图（供派生流与页面共用） */
+  /** 构建步骤视图（供派生流与页面共用）：接续量 / 累计量口径与步骤页选择器保持一致 */
   buildStepViews(snapshot: StepTimelineSnapshot): StepView[] {
-    const bridgeName = new Map(snapshot.bridges.map((item) => [item.id, item.name]));
-    const ordered = sortSteps(snapshot.steps);
-    const cumulative = new Map<string, number>();
-    let running = 0;
-    for (const step of ordered) {
-      running += step.targetLiftMm;
-      cumulative.set(step.id, Number(running.toFixed(2)));
-    }
-    return ordered.map((step) => {
-      const rows = snapshot.readings.filter((item) => item.stepId === step.id);
-      const cumulativeLiftMm = cumulative.get(step.id) ?? step.targetLiftMm;
-      const deviation = rows.length > 0 ? syncDeviationMm(rows) : null;
-      const overLimit = cumulativeLiftMm > step.limitMm;
-      return {
-        ...step,
-        bridgeName: bridgeName.get(step.bridgeId) ?? '未归属桥梁',
-        cumulativeLiftMm,
-        overLimit,
-        readingCount: rows.length,
-        syncDeviationMm: deviation,
-        validation: overLimit
-          ? `累计顶升量 ${cumulativeLiftMm} mm 已超过限位 ${step.limitMm} mm，需立即停止并复核`
-          : deviation !== null && syncLevel(deviation) === 'exceed'
-            ? `同步偏差 ${deviation.toFixed(2)} mm 超允许值，需调平后继续`
-            : '顶升参数与监测数据均在控制范围内',
-      };
-    });
+    return buildStepViews(snapshot.steps, snapshot.readings, snapshot.bridges);
   }
 }

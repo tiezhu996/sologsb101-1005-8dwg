@@ -96,10 +96,10 @@ interface BatchRow {
     <div class="stat-grid">
       <app-stat-badge title="测点读数" [value]="stats().readingCount" [suffix]="'条'" color="#1565c0" />
       <app-stat-badge
-        title="当前步骤平均位移"
-        [value]="formatMm(currentAverage())"
+        title="本步接续量（多点最大）"
+        [value]="continuationText()"
         color="#00897b"
-        [hint]="selectedStepLabel()"
+        [hint]="continuationHintShort()"
       />
       <app-stat-badge
         title="同步偏差"
@@ -176,6 +176,22 @@ interface BatchRow {
             </button>
           </div>
           <div class="gb-hint">{{ dateHint() }}</div>
+
+          @if (selectedStep(); as step) {
+            <div class="gb-timeline continuation-bar" style="margin-top: 8px">
+              <div
+                class="gb-timeline-node"
+                [class.is-exceed]="continuationBlocked()"
+                [class.is-watch]="!continuationBlocked() && step.continuation.latestRoundCount < 2"
+              >
+                <div class="continuation-title">
+                  <mat-icon>{{ continuationBlocked() ? 'error' : 'engineering' }}</mat-icon>
+                  停工再进场接续：{{ continuationHeadline() }}
+                </div>
+                <div class="gb-hint">{{ step.continuation.hint }}</div>
+              </div>
+            </div>
+          }
 
           @if (selectedStep(); as step) {
             <div class="gb-table-wrap" style="margin-top: 10px">
@@ -314,6 +330,18 @@ interface BatchRow {
         border-radius: 6px;
         font-size: 13px;
       }
+      .continuation-bar .continuation-title {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-weight: 600;
+      }
+      .continuation-bar .gb-timeline-node.is-exceed .continuation-title {
+        color: #c62828;
+      }
+      .continuation-bar .gb-timeline-node.is-watch .continuation-title {
+        color: #ed6c02;
+      }
     `,
   ],
 })
@@ -419,11 +447,40 @@ export class ReadingEntryPage {
     this.stepViews().find((step) => step.id === this.selectedStepId()) ?? null,
   );
 
-  readonly currentAverage = computed(() => {
+  /** 接续是否受阻：未到位且评估不放行 */
+  readonly continuationBlocked = computed(() => {
     const step = this.selectedStep();
-    if (!step) return 0;
-    return meanDisplacement(this.readings().filter((item) => item.stepId === step.id));
+    return !!step && step.state !== 'arrived' && !step.continuation.canAdvance;
   });
+
+  /** 接续徽标数值：放不出接续量时显示「未完成」 */
+  continuationText(): string {
+    const step = this.selectedStep();
+    if (!step) return '—';
+    if (step.state === 'arrived') return '已到位';
+    const c = step.continuation;
+    if (c.continuationMm === null) return '未完成';
+    return `${c.continuationMm} mm`;
+  }
+
+  continuationHintShort(): string {
+    const step = this.selectedStep();
+    if (!step) return '请选择步骤';
+    if (step.state === 'arrived') return '本步已到位';
+    const c = step.continuation;
+    if (c.incompleteReason) return c.incompleteReason;
+    return `已完成基准取最新一组多点最大位移${c.completedMm !== null ? `（${c.completedMm} mm）` : ''}，不按平均位移或计划目标估算`;
+  }
+
+  /** 接续面板标题（一行） */
+  continuationHeadline(): string {
+    const step = this.selectedStep();
+    if (!step) return '请选择步骤';
+    if (step.state === 'arrived') return '本步已到位，无需接续';
+    const c = step.continuation;
+    if (c.incompleteReason) return `按未完成处理，接续量暂不能给出（${c.incompleteReason}）`;
+    return `已完成 ${c.completedMm ?? '-'} mm，本步接续量 ${c.continuationMm ?? '-'} mm`;
+  }
 
   readonly currentDeviation = computed(() => {
     const step = this.selectedStep();
